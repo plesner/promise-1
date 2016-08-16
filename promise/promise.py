@@ -23,6 +23,24 @@ class CountdownLatch(object):
         return self._count
 
 
+class TraceOptions(object):
+    """Controls how to trace interactions with a promise."""
+
+    def __init__(self, capture_trace=True, frame_skip_count=0):
+        self.capture_trace = capture_trace
+        self.frame_skip_count = frame_skip_count
+
+
+"""Tracing options that cause traces to not be captured."""
+TRACING_DISABLED = TraceOptions(capture_trace=False)
+
+"""
+Tracing options that causes a trace to be captured that doesn't include the
+caller's frame.
+"""
+SKIP_TRACING_THIS_FRAME = TraceOptions(capture_trace=True, frame_skip_count=1)
+
+
 class Promise(object):
     """
     This is the Promise class that complies
@@ -35,7 +53,7 @@ class Promise(object):
     REJECTED = 0
     FULFILLED = 1
 
-    def __init__(self, fn=None):
+    def __init__(self, fn=None, trace_options=None):
         """
         Initialize the Promise into a pending state.
         """
@@ -84,14 +102,14 @@ class Promise(object):
 
     @classmethod
     def fulfilled(cls, x):
-        p = cls()
+        p = cls(trace_options=TRACING_DISABLED)
         p.fulfill(x)
         return p
 
     @classmethod
-    def rejected(cls, reason):
-        p = cls()
-        p.reject(reason)
+    def rejected(cls, reason, cause=None):
+        p = cls(trace_options=TRACING_DISABLED)
+        p.reject(reason, cause)
         return p
 
     def fulfill(self, x):
@@ -116,8 +134,7 @@ class Promise(object):
             if self._state != self.PENDING:
                 return
 
-            self._value = value
-            self._state = self.FULFILLED
+            self._mark_fulfilled(value)
 
             callbacks = self._callbacks
             # We will never call these callbacks again, so allow
@@ -138,7 +155,11 @@ class Promise(object):
                 # Ignore errors in callbacks
                 pass
 
-    def reject(self, reason):
+    def _mark_fulfilled(self, value):
+        self._value = value
+        self._state = self.FULFILLED
+
+    def reject(self, reason, cause=None):
         """
         Reject this promise for a given reason.
         """
@@ -148,8 +169,7 @@ class Promise(object):
             if self._state != self.PENDING:
                 return
 
-            self._reason = reason
-            self._state = self.REJECTED
+            self._mark_rejected(reason, cause, 1)
 
             errbacks = self._errbacks
             # We will never call these errbacks again, so allow
@@ -169,6 +189,11 @@ class Promise(object):
             except Exception:
                 # Ignore errors in errback
                 pass
+
+    def _mark_rejected(self, reason, cause, frame_skip_count):
+        print(reason.__traceback__)
+        self._reason = reason
+        self._state = self.REJECTED
 
     @property
     def is_pending(self):
@@ -325,7 +350,7 @@ class Promise(object):
         :type failure: (object) -> object
         :rtype : Promise
         """
-        ret = self.__class__()
+        ret = self.__class__(trace_options=SKIP_TRACING_THIS_FRAME)
 
         def call_and_fulfill(v):
             """
@@ -349,9 +374,9 @@ class Promise(object):
                 if callable(failure):
                     ret.fulfill(failure(r))
                 else:
-                    ret.reject(r)
+                    ret.reject(r, cause=self)
             except Exception as e:
-                ret.reject(e)
+                ret.reject(e, cause=self)
 
         self.done(call_and_fulfill, call_and_reject)
 
@@ -453,6 +478,14 @@ class Promise(object):
             return dict_type(zip(keys, resolved_values))
 
         return cls.all(values).then(handle_success)
+
+    @property
+    def rejection_trace(self):
+        """
+        If this is a tracing promise that has been rejected, returns a trace of
+        the sequence of rejections.
+        """
+        return None
 
 
 promisify = Promise.promisify
