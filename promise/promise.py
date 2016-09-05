@@ -1,6 +1,6 @@
 from threading import Event, RLock
 from .compat import Future, iscoroutine, ensure_future, iterate_promise
-
+from . import tracing
 
 class CountdownLatch(object):
 
@@ -23,24 +23,6 @@ class CountdownLatch(object):
         return self._count
 
 
-class TraceOptions(object):
-    """Controls how to trace interactions with a promise."""
-
-    def __init__(self, capture_trace=True, frame_skip_count=0):
-        self.capture_trace = capture_trace
-        self.frame_skip_count = frame_skip_count
-
-
-"""Tracing options that cause traces to not be captured."""
-TRACING_DISABLED = TraceOptions(capture_trace=False)
-
-"""
-Tracing options that causes a trace to be captured that doesn't include the
-caller's frame.
-"""
-SKIP_TRACING_THIS_FRAME = TraceOptions(capture_trace=True, frame_skip_count=1)
-
-
 class Promise(object):
     """
     This is the Promise class that complies
@@ -53,7 +35,9 @@ class Promise(object):
     REJECTED = 0
     FULFILLED = 1
 
-    def __init__(self, fn=None, trace_options=None):
+    _force_tracing = False
+
+    def __init__(self, fn=None, trace_start_fn=None):
         """
         Initialize the Promise into a pending state.
         """
@@ -65,6 +49,7 @@ class Promise(object):
         self._errbacks = []
         self._event = Event()
         self._future = None
+        self._origin = self._maybe_capture_origin(trace_start_fn)
         if fn:
             self.do_resolve(fn)
 
@@ -72,6 +57,15 @@ class Promise(object):
         return iterate_promise(self)
 
     __await__ = __iter__
+
+    @classmethod
+    def set_force_tracing(cls, value):
+        cls._force_tracing = value
+
+    def _maybe_capture_origin(self, trace_start_fn):
+        if not trace_start_fn is None:
+            return tracing.Origin.capture(trace_start_fn)
+
 
     @property
     def future(self):
@@ -156,6 +150,8 @@ class Promise(object):
                 pass
 
     def _mark_fulfilled(self, value):
+        if self._origin:
+            self._origin._mark_fulfilled(value)
         self._value = value
         self._state = self.FULFILLED
 
@@ -191,7 +187,8 @@ class Promise(object):
                 pass
 
     def _mark_rejected(self, reason, cause, frame_skip_count):
-        print(reason.__traceback__)
+        if self._origin:
+            self._origin._mark_rejected(reason, cause, frame_skip_count)
         self._reason = reason
         self._state = self.REJECTED
 
@@ -485,7 +482,13 @@ class Promise(object):
         If this is a tracing promise that has been rejected, returns a trace of
         the sequence of rejections.
         """
-        return None
+        return self._origin and self._origin.rejection_trace
+
+
+class TracingPromise(Promise):
+
+    def __init__(self, fn=None, trace_start_fn=None):
+        super(TracingPromise, self).__init__(fn, TracingPromise.__init__)
 
 
 promisify = Promise.promisify
